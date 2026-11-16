@@ -1,0 +1,148 @@
+"""
+T de ETL - TRANSFORMAÇÃO
+Lê os arquivos brutos do Data Lake, limpa, padroniza e agrega por semana.
+Também roda o "portão de qualidade": se os dados vierem quebrados, o lote
+é barrado e não vai pro Warehouse.
+
+Sobre LGPD: os dados do InfoDengue já chegam agregados por município e semana,
+sem nome, CPF, endereço ou idade de ninguém. Mesmo assim, só mantemos as
+colunas necessárias (princípio da necessidade, art. 6º, III).
+"""
+from datetime import date
+from pathlib import Path
+import json
+
+import numpy as np
+import pandas as pd
+
+PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
+ID_DOENCA = {"dengue": 1, "chikungunya": 2, "zika": 3}
+
+
+class FalhaDeQualidade(Exception):
+    """Lote barrado no portão de qualidade."""
+
+
+def _inicio_semana_epi(d: pd.Series) -> pd.Series:
+    # semana epidemiológica começa no domingo
+    return (d - pd.to_timedelta((d.dt.weekday + 1) % 7, unit="D")).dt.normalize()
+
+
+def transformar_casos(caminho: Path, doenca: str) -> pd.DataFrame:
+    df = pd.read_csv(caminho)
+
+    # 1. Data de início da semana (vem como texto ou como milissegundos, depende da versão)
+    if pd.api.types.is_numeric_dtype(df["data_iniSE"]):
+        df["semana_inicio"] = pd.to_datetime(df["data_iniSE"], unit="ms")
+    else:
+        df["semana_inicio"] = pd.to_datetime(df["data_iniSE"])
+    df["semana_inicio"] = df["semana_inicio"].dt.normalize()
+
+    # 2. Ano e número da semana epidemiológica (SE = 202401 -> 2024, semana 1)
+    df["ano"] = (df["SE"] // 100).astype(int)
+    df["semana_epi"] = (df["SE"] % 100).astype(int)
+
+    # 3. Só as colunas que o projeto usa (necessidade - LGPD)
+    df = df.rename(columns={
+        "casos": "casos_notificados",
+        "casos_est": "casos_estimados",
+        "p_inc100k": "incidencia_100k",
+        "nivel": "nivel_alerta",
+    })
+    df = df[["semana_inicio", "ano", "semana_epi", "casos_notificados",
+             "casos_estimados", "incidencia_100k", "nivel_alerta"]]
+
+    # 4. Limpeza
+    df = df.drop_duplicates(subset="semana_inicio", keep="last")          # unicidade
+    df["casos_notificados"] = df["casos_notificados"].fillna(0).clip(lower=0).astype(int)
+    df["casos_estimados"] = df["casos_estimados"].fillna(df["casos_notificados"]).clip(lower=0)
+    df = df[df["semana_inicio"] <= pd.Timestamp(date.today())]          # sem datas futuras
+
+    df["id_doenca"] = ID_DOENCA[doenca]
+    return df.sort_values("semana_inicio").reset_index(drop=True)
+
+
+def transformar_clima(caminho: Path) -> pd.DataFrame:
+    bruto = json.loads(caminho.read_text(encoding="utf-8"))["daily"]
+    df = pd.DataFrame(bruto)
+    df["data"] = pd.to_datetime(df["time"])
+    df["semana_inicio"] = _inicio_semana_epi(df["data"])
+
+    agg = {
+        "precipitation_sum": "sum",
+        "temperature_2m_mean": "mean",
+        "temperature_2m_min": "min",
+    }
+    if "relative_humidity_2m_mean" in df:
+        agg["relative_humidity_2m_mean"] = "mean"
+
+    semanal = df.groupby("semana_inicio").agg(agg).reset_index()
+    # descarta semanas incompletas (menos de 7 dias de dado)
+    dias = df.groupby("semana_inicio").size().reset_index(name="dias")
+    semanal = semanal.merge(dias, on="semana_inicio")
+    semanal = semanal[semanal["dias"] == 7].drop(columns="dias")
+
+    semanal = semanal.rename(columns={
+        "precipitation_sum": "chuva_mm",
+        "temperature_2m_mean": "temp_media",
+        "temperature_2m_min": "temp_min",
+        "relative_humidity_2m_mean": "umidade_media",
+    })
+    if "umidade_media" not in semanal:
+        semanal["umidade_media"] = np.nan
+    return semanal.round({"chuva_mm": 1, "temp_media": 1, "temp_min": 1, "umidade_media": 1})
+
+
+def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> list[tuple]:
+    """Regras simples. Erro = barra o lote. Aviso = segue, mas registra."""
+    log = []
+    for doenca, df in casos.items():
+        if len(df) < 52:
+            raise FalhaDeQualidade(f"{doenca}: só {len(df)} semanas (esperado 52+)")
+        nulos = df["semana_inicio"].isna().mean()
+        if nulos > 0.05:                                            # completude
+            raise FalhaDeQualidade(f"{doenca}: {nulos:.0%} sem data")
+        ultima = df["semana_inicio"].max()
+        atraso = (pd.Timestamp(date.today()) - ultima).days
+        if atraso > 21:                                             # atualidade
+            log.append(("qualidade", "aviso", f"{doenca}: última semana é {ultima.date()} ({atraso} dias atrás)"))
+        log.append(("qualidade", "ok", f"{doenca}: {len(df)} semanas válidas"))
+
+    if clima["chuva_mm"].lt(0).any():                               # validade
+        raise FalhaDeQualidade("clima: chuva negativa")
+    log.append(("qualidade", "ok", f"clima: {len(clima)} semanas válidas"))
+    return log
+
+
+def montar_dim_tempo(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> pd.DataFrame:
+    partes = [df[["semana_inicio", "ano", "semana_epi"]] for df in casos.values()]
+    tempo = pd.concat(partes).drop_duplicates("semana_inicio")
+
+    # semanas que só existem no clima: calcula ano/semana aproximados
+    so_clima = clima.loc[~clima["semana_inicio"].isin(tempo["semana_inicio"]), ["semana_inicio"]].copy()
+    if len(so_clima):
+        iso = (so_clima["semana_inicio"] + pd.Timedelta(days=3)).dt.isocalendar()
+        so_clima["ano"] = iso["year"].astype(int)
+        so_clima["semana_epi"] = iso["week"].astype(int)
+        tempo = pd.concat([tempo, so_clima])
+
+    tempo["mes"] = (tempo["semana_inicio"] + pd.Timedelta(days=3)).dt.month
+    tempo["estacao_chuvosa"] = tempo["mes"].between(4, 7)
+    return tempo.sort_values("semana_inicio").reset_index(drop=True)
+
+
+def transformar_tudo(arquivos: dict) -> dict:
+    casos = {d: transformar_casos(p, d) for d, p in arquivos["infodengue"].items()}
+    clima = transformar_clima(arquivos["clima"])
+    log = portao_de_qualidade(casos, clima)
+    tempo = montar_dim_tempo(casos, clima)
+
+    # camada "prata": dado limpo salvo no lake também (bom pra auditoria)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    fato_casos = pd.concat(casos.values(), ignore_index=True)
+    fato_casos.to_csv(PROCESSED_DIR / "fato_casos.csv", index=False)
+    clima.to_csv(PROCESSED_DIR / "fato_clima.csv", index=False)
+    tempo.to_csv(PROCESSED_DIR / "dim_tempo.csv", index=False)
+
+    print(f"[transform] {len(fato_casos)} linhas de casos, {len(clima)} semanas de clima")
+    return {"fato_casos": fato_casos, "fato_clima": clima, "dim_tempo": tempo, "log": log}

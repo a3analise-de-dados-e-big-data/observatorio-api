@@ -1,0 +1,58 @@
+name: observatorio
+
+services:
+  # Data Warehouse
+  db:
+    image: postgres:16-alpine
+    container_name: observatorio-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: observatorio
+      POSTGRES_USER: observatorio
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?defina DB_PASSWORD no arquivo .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observatorio"]
+      interval: 5s
+      retries: 10
+    # só na rede interna: o banco NÃO fica exposto na internet, só a API e o ETL enxergam ele
+    networks:
+      - interno
+
+  # API (lê o Warehouse). O Caddy compartilhado da VPS chega nela pela rede "edge".
+  api:
+    build: ./api
+    container_name: observatorio-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://observatorio:${DB_PASSWORD}@db:5432/observatorio
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - interno
+      - edge
+
+  # ETL (roda sob demanda / pelo cron, não fica ligado)
+  etl:
+    build: ./etl
+    profiles: ["etl"]
+    environment:
+      DATABASE_URL: postgresql://observatorio:${DB_PASSWORD}@db:5432/observatorio
+    volumes:
+      - ./data:/app/data          # Data Lake: arquivos brutos ficam na VPS
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - interno
+
+volumes:
+  pgdata:
+
+networks:
+  interno:
+  edge:
+    external: true

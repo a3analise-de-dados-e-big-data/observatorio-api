@@ -1,0 +1,4 @@
+observatorio-api.rafaelrangelalmeida.com {
+	encode gzip
+	reverse_proxy observatorio-api:8000
+}
