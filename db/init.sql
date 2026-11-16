@@ -19,8 +19,9 @@ CREATE TABLE IF NOT EXISTS dim_doenca (
     nome       TEXT NOT NULL UNIQUE
 );
 
+-- zika ficou de fora: o InfoDengue parou de publicar a série de Salvador em fev/2024
 INSERT INTO dim_doenca (id_doenca, nome) VALUES
-    (1, 'dengue'), (2, 'chikungunya'), (3, 'zika')
+    (1, 'dengue'), (2, 'chikungunya')
 ON CONFLICT DO NOTHING;
 
 -- dim_bairro e dim_faixa_etaria existem no modelo do documento, mas
@@ -33,8 +34,10 @@ CREATE TABLE IF NOT EXISTS fato_casos (
     semana_inicio    DATE     NOT NULL REFERENCES dim_tempo(semana_inicio),
     id_doenca        SMALLINT NOT NULL REFERENCES dim_doenca(id_doenca),
     casos_notificados INTEGER NOT NULL,
-    casos_estimados  NUMERIC(10,1),        -- com correção de atraso (nowcasting)
-    incidencia_100k  NUMERIC(10,2),
+    casos_estimados  NUMERIC(10,1),        -- estimativa do InfoDengue com correção de atraso (nowcasting)
+    casos_est_min    NUMERIC(10,1),        -- faixa da estimativa (só faz diferença nas semanas recentes)
+    casos_est_max    NUMERIC(10,1),
+    incidencia_100k  NUMERIC(10,2),        -- calculada pelo InfoDengue sobre a estimativa
     nivel_alerta     SMALLINT,             -- 1 verde, 2 amarelo, 3 laranja, 4 vermelho
     PRIMARY KEY (semana_inicio, id_doenca)
 );

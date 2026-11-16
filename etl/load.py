@@ -39,7 +39,7 @@ def carregar_tudo(dados: dict):
                 ["semana_inicio"])
         _upsert(cur, "fato_casos", dados["fato_casos"],
                 ["semana_inicio", "id_doenca", "casos_notificados", "casos_estimados",
-                 "incidencia_100k", "nivel_alerta"],
+                 "casos_est_min", "casos_est_max", "incidencia_100k", "nivel_alerta"],
                 ["semana_inicio", "id_doenca"])
         _upsert(cur, "fato_clima", dados["fato_clima"],
                 ["semana_inicio", "chuva_mm", "temp_media", "temp_min", "umidade_media"],

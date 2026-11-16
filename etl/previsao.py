@@ -22,6 +22,9 @@ from load import DATABASE_URL, registrar_log
 
 HORIZONTES = [1, 2, 3, 4]
 SEMANAS_TESTE = 52
+# série parada há mais que isso = a fonte deixou de publicar; prever a partir dela
+# seria apresentar como "próximas semanas" semanas que já passaram
+MAX_DIAS_SEM_DADO = 60
 
 
 def _carregar(conn, id_doenca: int) -> pd.DataFrame:
@@ -101,6 +104,15 @@ def gerar_previsoes():
             df = _carregar(conn, id_doenca)
             if len(df) < 2 * SEMANAS_TESTE + 10 or df["casos"].sum() == 0:
                 print(f"[previsao] {nome}: dados insuficientes, pulando")
+                continue
+
+            atraso = (pd.Timestamp.today().normalize() - df["semana_inicio"].iloc[-1]).days
+            if atraso > MAX_DIAS_SEM_DADO:
+                msg = f"{nome}: último dado há {atraso} dias, previsão não gerada"
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM fato_previsao WHERE id_doenca = %s", (id_doenca,))
+                    registrar_log(cur, "previsao", "aviso", msg)
+                print(f"[previsao] {msg}")
                 continue
 
             prev, erros = prever_doenca(df)

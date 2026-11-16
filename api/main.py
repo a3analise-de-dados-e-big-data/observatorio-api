@@ -11,7 +11,7 @@ from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Query
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://observatorio:observatorio@localhost:5432/observatorio")
-DOENCAS = {"dengue": 1, "chikungunya": 2, "zika": 3}
+DOENCAS = {"dengue": 1, "chikungunya": 2}
 NIVEIS = {1: "verde", 2: "amarelo", 3: "laranja", 4: "vermelho"}
 
 app = FastAPI(
@@ -49,8 +49,9 @@ def resumo(doenca: str = "dengue"):
     """Números em destaque do painel."""
     d = id_doenca(doenca)
     atual = consulta("""
-        SELECT semana_inicio, casos_estimados::float AS casos, incidencia_100k::float AS incidencia,
-               nivel_alerta
+        SELECT semana_inicio, casos_notificados AS notificados,
+               casos_estimados::float AS estimados, casos_est_min::float AS est_min,
+               casos_est_max::float AS est_max, incidencia_100k::float AS incidencia, nivel_alerta
         FROM fato_casos WHERE id_doenca = %s ORDER BY semana_inicio DESC LIMIT 1
     """, (d,))
     if not atual:
@@ -67,7 +68,7 @@ def resumo(doenca: str = "dengue"):
     media_hist = None
     if semana:
         r = consulta("""
-            SELECT avg(c.casos_estimados)::float AS media
+            SELECT avg(c.casos_notificados)::float AS media
             FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
             WHERE c.id_doenca = %s AND t.semana_epi = %s AND c.semana_inicio < %s
         """, (d, semana[0]["semana_epi"], atual[0]["semana_inicio"]))
@@ -76,7 +77,14 @@ def resumo(doenca: str = "dengue"):
     return {
         "doenca": doenca,
         "semana_atual": atual[0]["semana_inicio"],
-        "casos_semana": atual[0]["casos"],
+        # o que já foi notificado (contagem) e quanto o InfoDengue estima que a semana vai fechar,
+        # porque notificação chega com semanas de atraso
+        "casos_notificados_semana": atual[0]["notificados"],
+        "estimativa_infodengue": {
+            "casos": atual[0]["estimados"],
+            "minimo": atual[0]["est_min"],
+            "maximo": atual[0]["est_max"],
+        },
         "incidencia_100k": atual[0]["incidencia"],
         "nivel_alerta": NIVEIS.get(atual[0]["nivel_alerta"], "indefinido"),
         "media_historica_semana": media_hist,
@@ -117,10 +125,15 @@ def clima_vs_casos(doenca: str = "dengue", desde: date = Query(date(2023, 1, 1))
 
 @app.get("/api/anual")
 def anual(doenca: str = "dengue"):
-    """Total de casos por ano (pra contextualizar: 'em 2024 foi recorde')."""
+    """Total de casos notificados por ano (pra contextualizar: 'em 2024 foi recorde').
+    O ano em andamento vem com parcial = true e a data da última semana com dado."""
     d = id_doenca(doenca)
-    return consulta("""
-        SELECT t.ano, sum(c.casos_notificados)::int AS casos
+    anos = consulta("""
+        SELECT t.ano, sum(c.casos_notificados)::int AS casos, count(*)::int AS semanas,
+               max(c.semana_inicio) AS ultima_semana
         FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
         WHERE c.id_doenca = %s GROUP BY t.ano ORDER BY t.ano
     """, (d,))
+    for a in anos:
+        a["parcial"] = a["ano"] >= date.today().year
+    return anos

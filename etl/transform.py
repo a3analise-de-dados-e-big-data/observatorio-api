@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
-ID_DOENCA = {"dengue": 1, "chikungunya": 2, "zika": 3}
+ID_DOENCA = {"dengue": 1, "chikungunya": 2}
 
 
 class FalhaDeQualidade(Exception):
@@ -50,12 +50,15 @@ def transformar_casos(caminho: Path, doenca: str) -> pd.DataFrame:
         "nivel": "nivel_alerta",
     })
     df = df[["semana_inicio", "ano", "semana_epi", "casos_notificados",
-             "casos_estimados", "incidencia_100k", "nivel_alerta"]]
+             "casos_estimados", "casos_est_min", "casos_est_max",
+             "incidencia_100k", "nivel_alerta"]]
 
     # 4. Limpeza
     df = df.drop_duplicates(subset="semana_inicio", keep="last")          # unicidade
     df["casos_notificados"] = df["casos_notificados"].fillna(0).clip(lower=0).astype(int)
     df["casos_estimados"] = df["casos_estimados"].fillna(df["casos_notificados"]).clip(lower=0)
+    for col in ["casos_est_min", "casos_est_max"]:
+        df[col] = df[col].fillna(df["casos_estimados"]).clip(lower=0)
     df = df[df["semana_inicio"] <= pd.Timestamp(date.today())]          # sem datas futuras
 
     df["id_doenca"] = ID_DOENCA[doenca]

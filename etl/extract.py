@@ -18,7 +18,8 @@ import requests
 
 GEOCODE_SALVADOR = 2927408
 LAT, LON = -12.97, -38.50
-DOENCAS = ["dengue", "chikungunya", "zika"]
+# zika ficou de fora: o InfoDengue parou de publicar a série de Salvador em fev/2024
+DOENCAS = ["dengue", "chikungunya"]
 ANO_INICIO = 2015
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"

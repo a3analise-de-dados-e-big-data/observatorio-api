@@ -132,6 +132,15 @@ cd api && uvicorn main:app --reload    # API em http://localhost:8000/api/docs
 - **HTTPS não sobe / erro de certificado:** o DNS ainda não propagou. Confira com `dig observatorio-api.rafaelrangelalmeida.com` e veja `docker logs caddy`.
 - **Painel em branco / alerta "Não consegui carregar os dados":** o ETL ainda não rodou (passo 4).
 
+## Por que não tem zika
+
+O InfoDengue parou de publicar a série de zika de Salvador na semana de 11/02/2024 (última versão do modelo: 26/02/2024).
+Com o painel mostrando "próximas 4 semanas" e "nível de alerta", manter zika exibiria dado de 2024 como se fosse atual,
+então a doença saiu do ETL, da API e do painel. Se a série voltar, é só devolver `"zika"` em `etl/extract.py`,
+`etl/transform.py`, `api/main.py` e `db/init.sql`.
+
+Pela mesma razão, `etl/previsao.py` não gera previsão pra uma doença cujo último dado tenha mais de 60 dias.
+
 ## O que é cenário (não implementado)
 
 No documento, o projeto também usa dados por bairro (SMS Salvador), denúncias do 156 e LIRAa. Esses dados não são públicos, então o protótipo trabalha no nível da cidade inteira. O mapa por bairro fica como proposta.
