@@ -52,9 +52,10 @@ o Caddy só emite o certificado se o domínio já resolver.
 cd /root
 git clone https://github.com/a3analise-de-dados-e-big-data/observatorio-api.git
 cd observatorio-api
-cp .env.example .env
-nano .env          # troque a senha
+echo "DB_PASSWORD=$(openssl rand -hex 24)" > .env    # gera uma senha aleatória
 ```
+
+A senha só existe nesse `.env`, na VPS. Ninguém precisa decorar: a API e o ETL leem dali.
 
 **3. Subir banco e API**
 
@@ -68,18 +69,36 @@ docker compose up -d --build
 docker compose run --rm etl
 ```
 
-Saída esperada: `[extract] ...`, `[transform] ...`, `[load] Warehouse atualizado`, `[previsao] dengue: MAE ...`.
+Saída esperada:
 
-**5. Ligar no Caddy:** cole o conteúdo de `deploy/Caddyfile.add` no fim de `/opt/edge/Caddyfile` e recarregue:
+```
+[extract] dengue: ...
+[extract] chikungunya: ...
+[extract] clima: ...
+[transform] 1236 linhas de casos, 618 semanas de clima
+[load] Warehouse atualizado
+[previsao] dengue: MAE no último ano -> ...
+[previsao] chikungunya: MAE no último ano -> ...
+Pipeline concluído.
+```
+
+(O número de linhas cresce uma semana por vez, conforme o InfoDengue publica.)
+
+**5. Ligar no Caddy** (só depois que o DNS do passo 1 propagar)
+
+O Caddy é compartilhado com os outros projetos da VPS, então **valide antes de recarregar**:
+se o arquivo tiver erro, o `validate` falha e o `reload` nem roda, e os outros sites continuam no ar.
 
 ```bash
+grep -q observatorio-api /opt/edge/Caddyfile || cat deploy/Caddyfile.add >> /opt/edge/Caddyfile   # não duplica o bloco
+docker exec -w /etc/caddy caddy caddy validate --config Caddyfile
 docker exec -w /etc/caddy caddy caddy reload
 ```
 
 **6. Conferir:** `https://observatorio-api.rafaelrangelalmeida.com/api/saude`
 Documentação automática da API: `https://observatorio-api.rafaelrangelalmeida.com/api/docs`
 
-**7. Agendar o ETL toda segunda às 6h**
+**7. Agendar o ETL toda segunda**
 
 ```bash
 crontab -e
@@ -87,11 +106,39 @@ crontab -e
 0 6 * * 1 cd /root/observatorio-api && docker compose run --rm etl >> /var/log/observatorio-etl.log 2>&1
 ```
 
+`0 6 * * 1` = minuto 0, hora 6, toda segunda-feira. **A hora é a do relógio da VPS, que está em UTC**
+(`timedatectl | grep "Time zone"`), então o ETL roda às **3h de Salvador**. O InfoDengue atualiza
+uma vez por semana, então o horário não muda nada. Pra rodar às 6h de Salvador, use `0 9` no lugar de `0 6`.
+
+## Conferir se o ETL agendado está funcionando
+
+```bash
+# a linha está no crontab?
+crontab -l | grep observatorio
+
+# o comando funciona? (roda o mesmo que o cron roda, sem esperar segunda)
+cd /root/observatorio-api && docker compose run --rm etl >> /var/log/observatorio-etl.log 2>&1
+tail -5 /var/log/observatorio-etl.log          # última linha: "Pipeline concluído."
+
+# depois de uma segunda: o cron disparou?
+grep CRON /var/log/syslog | grep observatorio | tail -5
+
+# a carga chegou no banco? (a prova mais confiável)
+docker compose exec db psql -U observatorio -c \
+  "SELECT executado_em, etapa, status, mensagem FROM etl_log ORDER BY id DESC LIMIT 5;"
+```
+
+No `etl_log`, `executado_em` também está em UTC: uma carga de segunda às 3h de Salvador aparece como `06:00`.
+
 ## Atualizar depois de um push
 
 ```bash
 cd /root/observatorio-api && git pull && docker compose up -d --build
 ```
+
+O `db/init.sql` só roda na **primeira** subida do banco. Se um push mudar as tabelas, o banco que já
+existe não muda sozinho: aplique a mudança na mão (`docker compose exec db psql -U observatorio`,
+depois o `ALTER TABLE ...`) e rode o ETL de novo.
 
 ## Comandos úteis
 
