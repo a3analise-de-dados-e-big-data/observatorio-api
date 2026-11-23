@@ -4,7 +4,7 @@ Back-end do trabalho A3 (Análise de Dados e Big Data · UNIFACS): ETL, Data War
 O painel fica em outro repositório, [`observatorio-front`](https://github.com/a3analise-de-dados-e-big-data/observatorio-front), hospedado na Vercel.
 
 ```
-InfoDengue + Open-Meteo
+InfoDengue (Salvador + RMS) + Open-Meteo
       │  etl/extract.py      (E) baixa e guarda o original
       ▼
 data/raw/                     ← DATA LAKE (arquivos brutos, um por execução)
@@ -74,16 +74,19 @@ Saída esperada:
 
 ```
 [extract] dengue: ...
+[extract] dengue: 12 municípios da RMS
 [extract] chikungunya: ...
+[extract] chikungunya: 12 municípios da RMS
 [extract] clima: ...
-[transform] 1236 linhas de casos, 618 semanas de clima
+[transform] 1238 linhas de casos, 619 semanas de clima, 16094 linhas da RMS
 [load] Warehouse atualizado
 [previsao] dengue: MAE modelo vs ingênuo no último ano -> 1 sem: ... vs ..., ...
 [previsao] chikungunya: MAE modelo vs ingênuo no último ano -> ...
 Pipeline concluído.
 ```
 
-(O número de linhas cresce uma semana por vez, conforme o InfoDengue publica.)
+(O número de linhas cresce uma semana por vez, conforme o InfoDengue publica. São 27 downloads
+do InfoDengue: Salvador e os outros 12 municípios da RMS, para dengue e chikungunya.)
 
 No MAE, "modelo vs ingênuo" compara o erro do nosso modelo com o de chutar que daqui a h semanas
 os casos serão iguais aos de hoje. O modelo só está ajudando se o primeiro número for menor.
@@ -212,7 +215,7 @@ Pela mesma razão, `etl/previsao.py` não gera previsão pra uma doença cujo ú
 
 ## O que é cenário (não implementado)
 
-No documento, o projeto também usa dados por bairro (SMS Salvador), denúncias do 156 e LIRAa. Esses dados não são públicos, então o protótipo trabalha no nível da cidade inteira. O mapa por bairro fica como proposta.
+No documento, o projeto também usa dados por bairro (SMS Salvador), denúncias do 156 e LIRAa. Esses dados não são públicos, então o protótipo trabalha no nível da cidade inteira. O mapa por bairro fica como proposta; no lugar dele, o painel tem o mapa por **município da Região Metropolitana** (13 municípios, códigos do IBGE em `etl/extract.py`), que usa a mesma API do InfoDengue.
 
 ## LGPD no protótipo
 
