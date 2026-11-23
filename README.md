@@ -195,6 +195,18 @@ cd etl && python main.py && cd ..
 cd api && uvicorn main:app --reload    # API em http://localhost:8000/api/docs
 ```
 
+## Testes
+
+Testam a leitura do CSV do InfoDengue (data em texto e em milissegundos), o portão de qualidade
+(lote vazio, datas nulas, salto de casos) e o agrupamento semanal do clima. Não precisam de
+internet nem de banco.
+
+```bash
+cd etl
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## Se der erro
 
 - **Erro no ETL sobre alguma coluna (`KeyError: 'data_iniSE'`, `'p_inc100k'` etc.):** o InfoDengue mudou o nome de alguma coluna. Abra o CSV em `data/raw/infodengue/dengue/` e ajuste o `rename` em `etl/transform.py`.
