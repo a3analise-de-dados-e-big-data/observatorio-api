@@ -121,12 +121,14 @@ def montar_dim_tempo(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> pd.
     partes = [df[["semana_inicio", "ano", "semana_epi"]] for df in casos.values()]
     tempo = pd.concat(partes).drop_duplicates("semana_inicio")
 
-    # semanas que só existem no clima: calcula ano/semana aproximados
+    # semanas que só existem no clima: calcula ano/semana epidemiológica pela quarta-feira
+    # (a semana é do ano que tem 4+ dos seus 7 dias, ou seja, o ano da quarta;
+    #  semana 1 = quarta entre 1 e 7 de janeiro). Bate com o SE do InfoDengue.
     so_clima = clima.loc[~clima["semana_inicio"].isin(tempo["semana_inicio"]), ["semana_inicio"]].copy()
     if len(so_clima):
-        iso = (so_clima["semana_inicio"] + pd.Timedelta(days=3)).dt.isocalendar()
-        so_clima["ano"] = iso["year"].astype(int)
-        so_clima["semana_epi"] = iso["week"].astype(int)
+        quarta = so_clima["semana_inicio"] + pd.Timedelta(days=3)
+        so_clima["ano"] = quarta.dt.year
+        so_clima["semana_epi"] = (quarta.dt.dayofyear - 1) // 7 + 1
         tempo = pd.concat([tempo, so_clima])
 
     tempo["mes"] = (tempo["semana_inicio"] + pd.Timedelta(days=3)).dt.month
