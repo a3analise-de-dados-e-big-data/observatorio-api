@@ -27,7 +27,7 @@ def banco():
         yield conn
 
 
-def consulta(sql: str, params: tuple = ()) -> list[dict]:
+def consulta(sql: str, params: tuple | dict = ()) -> list[dict]:
     with banco() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -62,17 +62,12 @@ def resumo(doenca: str = "dengue"):
                coalesce(sum(limite_superior), 0)::float AS maximo
         FROM fato_previsao WHERE id_doenca = %s
     """, (d,))[0]
-    # canal endêmico simplificado: média da mesma semana nos anos anteriores
+    # faixa normal da semana atual, tirada do canal endêmico
     semana = consulta("SELECT semana_epi FROM dim_tempo WHERE semana_inicio = %s",
                       (atual[0]["semana_inicio"],))
-    media_hist = None
+    canal_semana = None
     if semana:
-        r = consulta("""
-            SELECT avg(c.casos_notificados)::float AS media
-            FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
-            WHERE c.id_doenca = %s AND t.semana_epi = %s AND c.semana_inicio < %s
-        """, (d, semana[0]["semana_epi"], atual[0]["semana_inicio"]))
-        media_hist = r[0]["media"]
+        canal_semana = next((c for c in canal(d) if c["semana_epi"] == semana[0]["semana_epi"]), None)
 
     return {
         "doenca": doenca,
@@ -87,9 +82,35 @@ def resumo(doenca: str = "dengue"):
         },
         "incidencia_100k": atual[0]["incidencia"],
         "nivel_alerta": NIVEIS.get(atual[0]["nivel_alerta"], "indefinido"),
-        "media_historica_semana": media_hist,
+        # compare com estimativa_infodengue.casos, não com os notificados (que ainda vão crescer)
+        "canal_endemico_semana": canal_semana,
         "previsao_4_semanas": prev,
     }
+
+
+def canal(d: int) -> list[dict]:
+    """Canal endêmico: para cada semana do ano, mediana e quartis dos casos ESTIMADOS
+    nos anos anteriores ao atual.
+    - mediana/quartis em vez de média: um ano de epidemia (2024) puxa a média pra cima
+    - estimados em vez de notificados: a semana atual ainda não fechou (atraso de notificação)
+    - entre q1 e q3 fica a metade "do meio" dos anos: é a faixa normal"""
+    return consulta("""
+        SELECT t.semana_epi,
+               percentile_cont(0.25) WITHIN GROUP (ORDER BY c.casos_estimados)::float AS q1,
+               percentile_cont(0.50) WITHIN GROUP (ORDER BY c.casos_estimados)::float AS mediana,
+               percentile_cont(0.75) WITHIN GROUP (ORDER BY c.casos_estimados)::float AS q3
+        FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
+        WHERE c.id_doenca = %(d)s
+          AND t.ano < (SELECT max(t2.ano) FROM fato_casos c2 JOIN dim_tempo t2 USING (semana_inicio)
+                       WHERE c2.id_doenca = %(d)s)
+        GROUP BY t.semana_epi ORDER BY t.semana_epi
+    """, {"d": d})
+
+
+@app.get("/api/canal-endemico")
+def canal_endemico(doenca: str = "dengue"):
+    """Faixa normal (q1 a q3) e mediana de cada semana epidemiológica, pra desenhar atrás da curva."""
+    return canal(id_doenca(doenca))
 
 
 @app.get("/api/casos/semanal")
