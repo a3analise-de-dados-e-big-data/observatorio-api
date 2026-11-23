@@ -77,12 +77,15 @@ Saída esperada:
 [extract] clima: ...
 [transform] 1236 linhas de casos, 618 semanas de clima
 [load] Warehouse atualizado
-[previsao] dengue: MAE no último ano -> ...
-[previsao] chikungunya: MAE no último ano -> ...
+[previsao] dengue: MAE modelo vs ingênuo no último ano -> 1 sem: ... vs ..., ...
+[previsao] chikungunya: MAE modelo vs ingênuo no último ano -> ...
 Pipeline concluído.
 ```
 
 (O número de linhas cresce uma semana por vez, conforme o InfoDengue publica.)
+
+No MAE, "modelo vs ingênuo" compara o erro do nosso modelo com o de chutar que daqui a h semanas
+os casos serão iguais aos de hoje. O modelo só está ajudando se o primeiro número for menor.
 
 **5. Ligar no Caddy** (só depois que o DNS do passo 1 propagar)
 
