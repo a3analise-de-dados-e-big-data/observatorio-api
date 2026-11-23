@@ -28,8 +28,11 @@ def _inicio_semana_epi(d: pd.Series) -> pd.Series:
     return (d - pd.to_timedelta((d.dt.weekday + 1) % 7, unit="D")).dt.normalize()
 
 
-def transformar_casos(caminho: Path, doenca: str) -> pd.DataFrame:
+def transformar_casos(caminho: Path, doenca: str) -> tuple[pd.DataFrame, float]:
+    """Devolve a tabela limpa e a fração de linhas SEM DATA no arquivo original
+    (medida antes da limpeza, porque o filtro de datas futuras descarta essas linhas)."""
     df = pd.read_csv(caminho)
+    nulos_data = float(df["data_iniSE"].isna().mean()) if len(df) else 0.0
 
     # 1. Data de início da semana (vem como texto ou como milissegundos, depende da versão)
     if pd.api.types.is_numeric_dtype(df["data_iniSE"]):
@@ -62,7 +65,7 @@ def transformar_casos(caminho: Path, doenca: str) -> pd.DataFrame:
     df = df[df["semana_inicio"] <= pd.Timestamp(date.today())]          # sem datas futuras
 
     df["id_doenca"] = ID_DOENCA[doenca]
-    return df.sort_values("semana_inicio").reset_index(drop=True)
+    return df.sort_values("semana_inicio").reset_index(drop=True), nulos_data
 
 
 def transformar_clima(caminho: Path) -> pd.DataFrame:
@@ -96,15 +99,16 @@ def transformar_clima(caminho: Path) -> pd.DataFrame:
     return semanal.round({"chuva_mm": 1, "temp_media": 1, "temp_min": 1, "umidade_media": 1})
 
 
-def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> list[tuple]:
+def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame,
+                        nulos_data: dict[str, float]) -> list[tuple]:
     """Regras simples. Erro = barra o lote. Aviso = segue, mas registra."""
     log = []
     for doenca, df in casos.items():
+        nulos = nulos_data[doenca]
+        if nulos > 0.05:                                            # completude
+            raise FalhaDeQualidade(f"{doenca}: {nulos:.0%} das linhas sem data")
         if len(df) < 52:
             raise FalhaDeQualidade(f"{doenca}: só {len(df)} semanas (esperado 52+)")
-        nulos = df["semana_inicio"].isna().mean()
-        if nulos > 0.05:                                            # completude
-            raise FalhaDeQualidade(f"{doenca}: {nulos:.0%} sem data")
         ultima = df["semana_inicio"].max()
         atraso = (pd.Timestamp(date.today()) - ultima).days
         if atraso > 21:                                             # atualidade
@@ -137,9 +141,11 @@ def montar_dim_tempo(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> pd.
 
 
 def transformar_tudo(arquivos: dict) -> dict:
-    casos = {d: transformar_casos(p, d) for d, p in arquivos["infodengue"].items()}
+    casos, nulos_data = {}, {}
+    for d, p in arquivos["infodengue"].items():
+        casos[d], nulos_data[d] = transformar_casos(p, d)
     clima = transformar_clima(arquivos["clima"])
-    log = portao_de_qualidade(casos, clima)
+    log = portao_de_qualidade(casos, clima, nulos_data)
     tempo = montar_dim_tempo(casos, clima)
 
     # camada "prata": dado limpo salvo no lake também (bom pra auditoria)
