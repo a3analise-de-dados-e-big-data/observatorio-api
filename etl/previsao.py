@@ -13,6 +13,10 @@ para cada horizonte (1, 2, 3 e 4 semanas à frente). Variáveis:
   - temperatura média de 3 a 6 semanas atrás
   - época do ano (seno/cosseno da semana)
 A faixa de incerteza (mín-máx) é um intervalo de ~90% calculado pelo erro do modelo.
+
+Validação: o modelo é treinado sem o último ano e testado nele, comparando com o
+modelo "ingênuo" (daqui a h semanas = casos de hoje). Se não ganhar do ingênuo,
+o modelo não está ajudando.
 """
 import numpy as np
 import pandas as pd
@@ -87,7 +91,9 @@ def prever_doenca(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         coef_t, _ = _ajustar(Xv[treino].to_numpy(), yv[treino].to_numpy())
         real = np.expm1(yv[teste].to_numpy())
         pred_modelo = np.expm1(Xv[teste].to_numpy() @ coef_t)
-        erros[h] = float(np.mean(np.abs(pred_modelo - real)))
+        pred_ingenuo = np.expm1(Xv.loc[teste, "casos_0"].to_numpy())  # daqui a h semanas = casos de hoje
+        erros[h] = (float(np.mean(np.abs(pred_modelo - real))),
+                    float(np.mean(np.abs(pred_ingenuo - real))))
 
         # modelo final com todo o histórico
         coef, sigma = _ajustar(Xv.to_numpy(), yv.to_numpy())
@@ -140,9 +146,9 @@ def gerar_previsoes():
                     [(r.semana_inicio.date(), id_doenca, r.casos_previstos,
                       r.limite_inferior, r.limite_superior) for r in prev.itertuples()],
                 )
-                resumo = ", ".join(f"{h} sem: {e:.0f}" for h, e in erros.items())
-                registrar_log(cur, "previsao", "ok", f"{nome} - erro médio (MAE) no último ano: {resumo}")
-            print(f"[previsao] {nome}: MAE no último ano -> {resumo}")
+                resumo = ", ".join(f"{h} sem: {m:.0f} vs {i:.0f}" for h, (m, i) in erros.items())
+                registrar_log(cur, "previsao", "ok", f"{nome} - MAE modelo vs ingênuo no último ano: {resumo}")
+            print(f"[previsao] {nome}: MAE modelo vs ingênuo no último ano -> {resumo}")
 
 
 if __name__ == "__main__":
