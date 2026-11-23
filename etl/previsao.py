@@ -77,15 +77,20 @@ def prever_doenca(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     for h in HORIZONTES:
         alvo = logc.shift(-h)
         validos = X.notna().all(axis=1) & alvo.notna()
-        Xv, yv = X[validos].to_numpy(), alvo[validos].to_numpy()
+        Xv, yv = X[validos], alvo[validos]
 
-        # validação: treina sem o último ano e mede o erro nele (MAE em casos)
-        coef_t, _ = _ajustar(Xv[:-SEMANAS_TESTE], yv[:-SEMANAS_TESTE])
-        pred_t = np.expm1(Xv[-SEMANAS_TESTE:] @ coef_t)
-        erros[h] = float(np.mean(np.abs(pred_t - np.expm1(yv[-SEMANAS_TESTE:]))))
+        # validação: testa no último ano. O treino para h semanas antes do teste:
+        # sem essa folga, os últimos exemplos de treino teriam o alvo (semana + h) dentro do teste
+        inicio_teste = Xv.index[-SEMANAS_TESTE]
+        treino = Xv.index < inicio_teste - h
+        teste = Xv.index >= inicio_teste
+        coef_t, _ = _ajustar(Xv[treino].to_numpy(), yv[treino].to_numpy())
+        real = np.expm1(yv[teste].to_numpy())
+        pred_modelo = np.expm1(Xv[teste].to_numpy() @ coef_t)
+        erros[h] = float(np.mean(np.abs(pred_modelo - real)))
 
         # modelo final com todo o histórico
-        coef, sigma = _ajustar(Xv, yv)
+        coef, sigma = _ajustar(Xv.to_numpy(), yv.to_numpy())
         x_hoje = X.iloc[-1].to_numpy()
         mu = float(x_hoje @ coef)
         previsoes.append({
