@@ -24,9 +24,15 @@ INSERT INTO dim_doenca (id_doenca, nome) VALUES
     (1, 'dengue'), (2, 'chikungunya')
 ON CONFLICT DO NOTHING;
 
+-- os 13 municípios da Região Metropolitana (a lista fica em etl/extract.py; o ETL preenche)
+CREATE TABLE IF NOT EXISTS dim_municipio (
+    geocode  INTEGER PRIMARY KEY,           -- código IBGE do município (7 dígitos)
+    nome     TEXT NOT NULL
+);
+
 -- dim_bairro e dim_faixa_etaria existem no modelo do documento, mas
 -- não há dado público por bairro/idade na API do InfoDengue.
--- No protótipo trabalhamos no nível da cidade inteira.
+-- Salvador fica no nível da cidade inteira; o mapa vai até o nível de município (RMS).
 
 -- ---------- FATOS ----------
 
@@ -40,6 +46,18 @@ CREATE TABLE IF NOT EXISTS fato_casos (
     incidencia_100k  NUMERIC(10,2),        -- calculada pelo InfoDengue sobre a estimativa
     nivel_alerta     SMALLINT,             -- 1 verde, 2 amarelo, 3 laranja, 4 vermelho
     PRIMARY KEY (semana_inicio, id_doenca)
+);
+
+-- casos por município da RMS e semana (grão mais fino que fato_casos, que é só Salvador)
+CREATE TABLE IF NOT EXISTS fato_casos_municipio (
+    semana_inicio     DATE     NOT NULL REFERENCES dim_tempo(semana_inicio),
+    id_doenca         SMALLINT NOT NULL REFERENCES dim_doenca(id_doenca),
+    geocode           INTEGER  NOT NULL REFERENCES dim_municipio(geocode),
+    casos_notificados INTEGER  NOT NULL,
+    casos_estimados   NUMERIC(10,1),
+    incidencia_100k   NUMERIC(10,2),
+    nivel_alerta      SMALLINT,
+    PRIMARY KEY (semana_inicio, id_doenca, geocode)
 );
 
 CREATE TABLE IF NOT EXISTS fato_clima (
