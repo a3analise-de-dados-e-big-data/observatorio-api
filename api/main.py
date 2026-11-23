@@ -199,6 +199,29 @@ def mapa_calor(doenca: str = "dengue"):
     """, (d,))
 
 
+@app.get("/api/municipios")
+def municipios(doenca: str = "dengue"):
+    """Mapa da Região Metropolitana: incidência somada nas últimas 4 semanas por município.
+    Município sem as 4 semanas (fonte atrasou) volta com incidência null, pra não comparar
+    4 semanas de um com 2 de outro."""
+    d = id_doenca(doenca)
+    fim = consulta("SELECT max(semana_inicio) AS fim FROM fato_casos_municipio WHERE id_doenca = %s",
+                   (d,))[0]["fim"]
+    if fim is None:
+        raise HTTPException(404, "Sem dados da RMS. Rode o ETL primeiro.")
+    linhas = consulta("""
+        SELECT m.geocode, m.nome,
+               CASE WHEN count(f.semana_inicio) = 4 THEN sum(f.incidencia_100k)::float END AS incidencia_4sem,
+               sum(f.casos_estimados)::float AS casos_4sem,
+               count(f.semana_inicio)::int AS semanas
+        FROM dim_municipio m
+        LEFT JOIN fato_casos_municipio f
+               ON f.geocode = m.geocode AND f.id_doenca = %s AND f.semana_inicio > %s::date - 28
+        GROUP BY m.geocode, m.nome ORDER BY m.nome
+    """, (d, fim))
+    return {"semana_fim": fim, "municipios": linhas}
+
+
 @app.get("/api/anual")
 def anual(doenca: str = "dengue"):
     """Total de casos notificados por ano (pra contextualizar: 'em 2024 foi recorde').
