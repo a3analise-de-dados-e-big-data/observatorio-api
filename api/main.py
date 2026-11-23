@@ -117,12 +117,18 @@ def canal_endemico(doenca: str = "dengue"):
 def casos_semanal(doenca: str = "dengue", desde: date = Query(date(2015, 1, 1))):
     """Curva de casos (observados) + previsão, pra o gráfico de linha."""
     d = id_doenca(doenca)
+    # semana_epi serve pra casar cada ponto com o canal endêmico no gráfico
     observados = consulta("""
-        SELECT semana_inicio, casos_notificados AS notificados, casos_estimados::float AS estimados
-        FROM fato_casos WHERE id_doenca = %s AND semana_inicio >= %s ORDER BY semana_inicio
+        SELECT c.semana_inicio, t.semana_epi, c.casos_notificados AS notificados,
+               c.casos_estimados::float AS estimados
+        FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
+        WHERE c.id_doenca = %s AND c.semana_inicio >= %s ORDER BY c.semana_inicio
     """, (d, desde))
+    # semanas futuras ainda não estão na dim_tempo: calcula como o ETL
+    # (a semana epidemiológica é do ano da sua quarta-feira; semana 1 = quarta entre 1 e 7/jan)
     previsao = consulta("""
-        SELECT semana_inicio, casos_previstos::float AS previstos,
+        SELECT semana_inicio, (extract(doy FROM semana_inicio + 3)::int - 1) / 7 + 1 AS semana_epi,
+               casos_previstos::float AS previstos,
                limite_inferior::float AS minimo, limite_superior::float AS maximo
         FROM fato_previsao WHERE id_doenca = %s ORDER BY semana_inicio
     """, (d,))
