@@ -187,6 +187,18 @@ def correlacao_defasagem(doenca: str = "dengue"):
     return resultado
 
 
+@app.get("/api/mapa-calor")
+def mapa_calor(doenca: str = "dengue"):
+    """Incidência de cada semana de cada ano, pro mapa de calor ano x semana
+    (mostra a sazonalidade e a epidemia de 2024 num gráfico só)."""
+    d = id_doenca(doenca)
+    return consulta("""
+        SELECT t.ano, t.semana_epi, c.incidencia_100k::float AS incidencia_100k
+        FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
+        WHERE c.id_doenca = %s ORDER BY t.ano, t.semana_epi
+    """, (d,))
+
+
 @app.get("/api/anual")
 def anual(doenca: str = "dengue"):
     """Total de casos notificados por ano (pra contextualizar: 'em 2024 foi recorde').
