@@ -24,6 +24,7 @@ observatorio-front (Vercel)   → painel
 | Pasta | O que é |
 | --- | --- |
 | `db/init.sql` | Tabelas do Warehouse (modelo estrela). Roda sozinho na 1ª subida. |
+| `db/migracoes/` | Mudanças nas tabelas pra aplicar na mão num banco que já existe (ver "Atualizar depois de um push") |
 | `etl/` | Pipeline: `extract.py`, `transform.py`, `load.py`, `previsao.py`, `main.py` (roda tudo) |
 | `api/main.py` | Endpoints que leem o Warehouse |
 | `deploy/Caddyfile.add` | Bloco pra colar no Caddy compartilhado da VPS |
@@ -140,8 +141,25 @@ cd /root/observatorio-api && git pull && docker compose up -d --build
 ```
 
 O `db/init.sql` só roda na **primeira** subida do banco. Se um push mudar as tabelas, o banco que já
-existe não muda sozinho: aplique a mudança na mão (`docker compose exec db psql -U observatorio`,
-depois o `ALTER TABLE ...`) e rode o ETL de novo.
+existe não muda sozinho: cada mudança vem num arquivo em `db/migracoes/`, que você aplica **uma vez**,
+na ordem do número, **antes** de rodar o ETL novo. Os arquivos usam `IF NOT EXISTS`, então rodar de
+novo não estraga nada.
+
+| Migração | O que faz |
+| --- | --- |
+| `001_rms.sql` | Cria `dim_municipio` e `fato_casos_municipio` (mapa da Região Metropolitana) |
+
+```bash
+cd /root/observatorio-api && git pull
+docker compose exec -T db psql -U observatorio -v ON_ERROR_STOP=1 < db/migracoes/001_rms.sql
+docker compose up -d --build          # API nova
+docker compose build etl && docker compose run --rm etl   # ETL novo: preenche as tabelas novas
+# conferir:
+docker compose exec db psql -U observatorio -c "SELECT count(*) FROM fato_casos_municipio;"
+```
+
+Se o ETL novo rodar antes da migração, a carga falha inteira (é uma transação só), o banco fica como
+estava e o erro aparece no `etl_log`. É só aplicar a migração e rodar de novo.
 
 ## Comandos úteis
 
