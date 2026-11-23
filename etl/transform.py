@@ -15,6 +15,8 @@ import json
 import numpy as np
 import pandas as pd
 
+from extract import GEOCODE_SALVADOR, MUNICIPIOS_RMS
+
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
 ID_DOENCA = {"dengue": 1, "chikungunya": 2}
 
@@ -134,8 +136,31 @@ def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame,
     return log
 
 
-def montar_dim_tempo(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> pd.DataFrame:
-    partes = [df[["semana_inicio", "ano", "semana_epi"]] for df in casos.values()]
+def transformar_rms(arquivos_rms: dict, casos: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, list[tuple]]:
+    """Casos por município da RMS, pro mapa. Mesma limpeza de Salvador, mas aqui
+    um município com problema só gera aviso e fica de fora: o mapa é complementar,
+    não pode barrar o lote de Salvador."""
+    partes, log = [], []
+    for doenca, por_municipio in arquivos_rms.items():
+        partes.append(casos[doenca].assign(geocode=GEOCODE_SALVADOR))  # Salvador já foi lida
+        for geocode, caminho in por_municipio.items():
+            nome = MUNICIPIOS_RMS[geocode]
+            if caminho is None:
+                log.append(("qualidade", "aviso", f"rms {doenca} / {nome}: download falhou, ficou de fora"))
+                continue
+            df, nulos = transformar_casos(caminho, doenca)
+            if len(df) < 52 or nulos > 0.05:
+                log.append(("qualidade", "aviso",
+                            f"rms {doenca} / {nome}: {len(df)} semanas, {nulos:.0%} sem data, ficou de fora"))
+                continue
+            partes.append(df.assign(geocode=geocode))
+    rms = pd.concat(partes, ignore_index=True)
+    log.append(("qualidade", "ok", f"rms: {rms['geocode'].nunique()} municípios, {len(rms)} linhas"))
+    return rms, log
+
+
+def montar_dim_tempo(casos: list[pd.DataFrame], clima: pd.DataFrame) -> pd.DataFrame:
+    partes = [df[["semana_inicio", "ano", "semana_epi"]] for df in casos]
     tempo = pd.concat(partes).drop_duplicates("semana_inicio")
 
     # semanas que só existem no clima: calcula ano/semana epidemiológica pela quarta-feira
@@ -159,7 +184,10 @@ def transformar_tudo(arquivos: dict) -> dict:
         casos[d], nulos_data[d] = transformar_casos(p, d)
     clima = transformar_clima(arquivos["clima"])
     log = portao_de_qualidade(casos, clima, nulos_data)
-    tempo = montar_dim_tempo(casos, clima)
+    rms, log_rms = transformar_rms(arquivos.get("rms", {}), casos)
+    log += log_rms
+    tempo = montar_dim_tempo([*casos.values(), rms], clima)
+    municipios = pd.DataFrame(list(MUNICIPIOS_RMS.items()), columns=["geocode", "nome"])
 
     # camada "prata": dado limpo salvo no lake também (bom pra auditoria)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -167,6 +195,9 @@ def transformar_tudo(arquivos: dict) -> dict:
     fato_casos.to_csv(PROCESSED_DIR / "fato_casos.csv", index=False)
     clima.to_csv(PROCESSED_DIR / "fato_clima.csv", index=False)
     tempo.to_csv(PROCESSED_DIR / "dim_tempo.csv", index=False)
+    rms.to_csv(PROCESSED_DIR / "fato_casos_municipio.csv", index=False)
 
-    print(f"[transform] {len(fato_casos)} linhas de casos, {len(clima)} semanas de clima")
-    return {"fato_casos": fato_casos, "fato_clima": clima, "dim_tempo": tempo, "log": log}
+    print(f"[transform] {len(fato_casos)} linhas de casos, {len(clima)} semanas de clima, "
+          f"{len(rms)} linhas da RMS")
+    return {"fato_casos": fato_casos, "fato_clima": clima, "dim_tempo": tempo,
+            "dim_municipio": municipios, "fato_casos_municipio": rms, "log": log}
