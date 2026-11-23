@@ -177,7 +177,8 @@ cd api && uvicorn main:app --reload    # API em http://localhost:8000/api/docs
 ## Se der erro
 
 - **Erro no ETL sobre alguma coluna (`KeyError: 'data_iniSE'`, `'p_inc100k'` etc.):** o InfoDengue mudou o nome de alguma coluna. Abra o CSV em `data/raw/infodengue/dengue/` e ajuste o `rename` em `etl/transform.py`.
-- **"LOTE BARRADO":** o portão de qualidade segurou os dados (ex.: API devolveu vazio). O painel continua com a última carga boa. Rode de novo mais tarde.
+- **`[qualidade] FALHOU`:** o portão de qualidade segurou os dados (ex.: API devolveu vazio). O painel continua com a última carga boa. Rode de novo mais tarde.
+- **`[extracao] FALHOU` / `[carga] FALHOU`:** fonte fora do ar ou banco com problema. Nada pela metade fica no banco (a carga é uma transação só) e o erro fica registrado no `etl_log` com `status = 'erro'`.
 - **`network edge declared as external, but could not be found`:** você está fora da VPS. Rode `docker network create edge`.
 - **HTTPS não sobe / erro de certificado:** o DNS ainda não propagou. Confira com `dig observatorio-api.rafaelrangelalmeida.com` e veja `docker logs caddy`.
 - **Painel em branco / alerta "Não consegui carregar os dados":** o ETL ainda não rodou (passo 4).
