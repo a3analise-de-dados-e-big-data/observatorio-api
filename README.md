@@ -227,7 +227,24 @@ Pela mesma razão, `etl/previsao.py` não gera previsão pra uma doença cujo ú
 
 ## O que é cenário (não implementado)
 
-No documento, o projeto também usa dados por bairro (SMS Salvador), denúncias do 156 e LIRAa. Esses dados não são públicos, então o protótipo trabalha no nível da cidade inteira. O mapa por bairro fica como proposta; no lugar dele, o painel tem o mapa por **município da Região Metropolitana** (13 municípios, códigos do IBGE em `etl/extract.py`), que usa a mesma API do InfoDengue.
+No documento, o projeto também usa dados por bairro (SMS Salvador), denúncias do 156 e LIRAa. Esses dados não são públicos, então o protótipo trabalha no nível da cidade inteira. O mapa por bairro fica como proposta (veja abaixo por quê); no lugar dele, o painel tem o mapa por **município da Região Metropolitana** (13 municípios, códigos do IBGE em `etl/extract.py`), que usa a mesma API do InfoDengue.
+
+### Por que não tem mapa por bairro de Salvador
+
+Conferido em nov/2026 nas fontes públicas:
+
+- **InfoDengue:** só publica por município (`alertcity` recebe o código IBGE da cidade).
+- **SINAN aberto** (notificações individuais anonimizadas do Ministério da Saúde, arquivo
+  `DENGBR25.csv` em `s3.sa-east-1.amazonaws.com/ckan.saude.gov.br/SINAN/Dengue/csv/`): tem 121
+  colunas, e o recorte geográfico mais fino é o **município de residência** (`ID_MN_RESI`). Não tem
+  bairro, endereço, CEP nem setor censitário: isso é retirado na anonimização.
+- **SMS Salvador:** conta os casos por **distrito sanitário** (12 distritos), mas não publica essa série
+  como dado aberto.
+
+Os **contornos** dos bairros existem (Malha de Bairros do Censo 2022 do IBGE e a base cartográfica
+da prefeitura); o que falta são os casos. Usar a unidade de saúde que notificou (`ID_UNIDADE`) como
+"bairro" seria enganoso: mostra onde a pessoa foi atendida, não onde mora. O caminho seria pedir
+à SMS, pela Lei de Acesso à Informação, os casos por bairro (ou distrito sanitário) e semana.
 
 ## LGPD no protótipo
 
