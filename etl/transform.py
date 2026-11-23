@@ -99,6 +99,15 @@ def transformar_clima(caminho: Path) -> pd.DataFrame:
     return semanal.round({"chuva_mm": 1, "temp_media": 1, "temp_min": 1, "umidade_media": 1})
 
 
+def semanas_com_explosao(df: pd.DataFrame) -> pd.Series:
+    """Semanas com mais de 5x a média das 4 anteriores (e pelo menos 50 casos).
+    Na epidemia de 2024 a maior alta de uma semana pra outra foi ~3x, então isso
+    costuma ser erro de digitação ou lote de notificações atrasadas."""
+    media_4_antes = df["casos_notificados"].shift(1).rolling(4).mean()
+    explosao = (df["casos_notificados"] > 5 * media_4_antes) & (df["casos_notificados"] >= 50)
+    return df.loc[explosao, "semana_inicio"]
+
+
 def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame,
                         nulos_data: dict[str, float]) -> list[tuple]:
     """Regras simples. Erro = barra o lote. Aviso = segue, mas registra."""
@@ -109,6 +118,10 @@ def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame,
             raise FalhaDeQualidade(f"{doenca}: {nulos:.0%} das linhas sem data")
         if len(df) < 52:
             raise FalhaDeQualidade(f"{doenca}: só {len(df)} semanas (esperado 52+)")
+        explosoes = semanas_com_explosao(df)                        # consistência (só avisa)
+        if len(explosoes):
+            datas = ", ".join(str(d.date()) for d in explosoes)
+            log.append(("qualidade", "aviso", f"{doenca}: salto de casos suspeito em {datas} (mantido)"))
         ultima = df["semana_inicio"].max()
         atraso = (pd.Timestamp(date.today()) - ultima).days
         if atraso > 21:                                             # atualidade
