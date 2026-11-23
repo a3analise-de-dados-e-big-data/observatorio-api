@@ -3,8 +3,9 @@ API do Observatório - lê o Data Warehouse e devolve JSON pro front.
 Docs automáticas em /api/docs (o FastAPI gera sozinho - bom pra mostrar na apresentação).
 """
 import os
+import statistics
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
@@ -148,6 +149,42 @@ def clima_vs_casos(doenca: str = "dengue", desde: date = Query(date(2023, 1, 1))
         WHERE t.semana_inicio >= %s
         ORDER BY t.semana_inicio
     """, (d, desde))
+
+
+def spearman(x: list, y: list) -> float | None:
+    """Correlação de Spearman: a de Pearson calculada sobre as POSIÇÕES (ranks) dos valores.
+    Não exige relação linear e um ano de epidemia não domina o resultado."""
+    try:
+        return round(statistics.correlation(x, y, method="ranked"), 3)
+    except statistics.StatisticsError:  # menos de 2 pares ou série constante
+        return None
+
+
+@app.get("/api/correlacao-defasagem")
+def correlacao_defasagem(doenca: str = "dengue"):
+    """Análise DIAGNÓSTICA: correlação entre os casos de uma semana e a chuva/temperatura
+    de 0 a 12 semanas ANTES. Se a chuva cria criadouros e o mosquito leva semanas pra virar
+    surto, a correlação cresce com a defasagem. Atenção: correlação não prova causa
+    (chuva e casos também sobem juntos só por serem da mesma época do ano)."""
+    d = id_doenca(doenca)
+    casos = consulta("SELECT semana_inicio, casos_estimados::float AS casos FROM fato_casos "
+                     "WHERE id_doenca = %s AND casos_estimados IS NOT NULL", (d,))
+    clima = {r["semana_inicio"]: r for r in consulta(
+        "SELECT semana_inicio, chuva_mm::float AS chuva, temp_media::float AS temp FROM fato_clima")}
+
+    resultado = []
+    for defasagem in range(13):
+        # casos da semana s  x  clima da semana s - defasagem
+        pares = [(c["casos"], clima.get(c["semana_inicio"] - timedelta(weeks=defasagem))) for c in casos]
+        chuva = [(n, cl["chuva"]) for n, cl in pares if cl and cl["chuva"] is not None]
+        temp = [(n, cl["temp"]) for n, cl in pares if cl and cl["temp"] is not None]
+        resultado.append({
+            "defasagem_semanas": defasagem,
+            "chuva": spearman(*zip(*chuva)) if chuva else None,
+            "temperatura": spearman(*zip(*temp)) if temp else None,
+            "semanas_usadas": len(chuva),
+        })
+    return resultado
 
 
 @app.get("/api/anual")
