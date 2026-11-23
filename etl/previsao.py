@@ -9,8 +9,8 @@ Ideia (fácil de explicar na apresentação):
 Modelo: regressão linear (mínimos quadrados) sobre log(casos), um modelo
 para cada horizonte (1, 2, 3 e 4 semanas à frente). Variáveis:
   - casos desta semana e das 2 anteriores
-  - chuva somada nas últimas 4 semanas
-  - temperatura média nas últimas 4 semanas
+  - chuva somada de 3 a 6 semanas atrás (o tempo de a chuva virar criadouro e mosquito)
+  - temperatura média de 3 a 6 semanas atrás
   - época do ano (seno/cosseno da semana)
 A faixa de incerteza (mín-máx) é um intervalo de ~90% calculado pelo erro do modelo.
 """
@@ -40,8 +40,8 @@ def _carregar(conn, id_doenca: int) -> pd.DataFrame:
         cur.execute(sql, (id_doenca,))
         df = pd.DataFrame(cur.fetchall(), columns=["semana_inicio", "casos", "chuva", "temp"])
     df["semana_inicio"] = pd.to_datetime(df["semana_inicio"])
-    # o clima chega com ~1 semana de atraso: repete o último valor conhecido
-    df[["chuva", "temp"]] = df[["chuva", "temp"]].ffill()
+    # o clima chega com ~1 semana de atraso, mas o modelo só usa clima de 3+ semanas atrás,
+    # então não precisa inventar (repetir) o valor das últimas semanas
     return df
 
 
@@ -51,8 +51,9 @@ def _features(df: pd.DataFrame) -> pd.DataFrame:
     X["casos_0"] = logc
     X["casos_1"] = logc.shift(1)
     X["casos_2"] = logc.shift(2)
-    X["chuva_4sem"] = df["chuva"].rolling(4).sum()
-    X["temp_4sem"] = df["temp"].rolling(4).mean()
+    # shift(3) + rolling(4) = semanas 3, 4, 5 e 6 antes desta
+    X["chuva_3a6sem"] = df["chuva"].shift(3).rolling(4).sum()
+    X["temp_3a6sem"] = df["temp"].shift(3).rolling(4).mean()
     semana = df["semana_inicio"].dt.isocalendar().week.astype(float)
     X["sazonal_sin"] = np.sin(2 * np.pi * semana / 52)
     X["sazonal_cos"] = np.cos(2 * np.pi * semana / 52)
@@ -68,6 +69,8 @@ def _ajustar(X: np.ndarray, y: np.ndarray):
 
 def prever_doenca(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     X = _features(df)
+    if X.iloc[-1].isna().any():
+        raise ValueError("falta clima de 3 a 6 semanas atrás (o Open-Meteo atrasou?)")
     logc = np.log1p(df["casos"])
     previsoes, erros = [], {}
 
@@ -115,7 +118,15 @@ def gerar_previsoes():
                 print(f"[previsao] {msg}")
                 continue
 
-            prev, erros = prever_doenca(df)
+            try:
+                prev, erros = prever_doenca(df)
+            except ValueError as e:
+                # sem previsão é melhor que previsão errada: tira a antiga e avisa
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM fato_previsao WHERE id_doenca = %s", (id_doenca,))
+                    registrar_log(cur, "previsao", "aviso", f"{nome}: {e}")
+                print(f"[previsao] {nome}: {e}")
+                continue
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM fato_previsao WHERE id_doenca = %s", (id_doenca,))
                 cur.executemany(
