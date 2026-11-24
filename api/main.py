@@ -182,7 +182,8 @@ def correlacao_defasagem(doenca: str = "dengue"):
             "defasagem_semanas": defasagem,
             "chuva": spearman(*zip(*chuva)) if chuva else None,
             "temperatura": spearman(*zip(*temp)) if temp else None,
-            "semanas_usadas": len(chuva),
+            "semanas_usadas_chuva": len(chuva),
+            "semanas_usadas_temperatura": len(temp),
         })
     return resultado
 
@@ -202,8 +203,8 @@ def mapa_calor(doenca: str = "dengue"):
 @app.get("/api/municipios")
 def municipios(doenca: str = "dengue"):
     """Mapa da Região Metropolitana: incidência somada nas últimas 4 semanas por município.
-    Município sem as 4 semanas (fonte atrasou) volta com incidência null, pra não comparar
-    4 semanas de um com 2 de outro."""
+    Município sem as 4 semanas (fonte atrasou) volta com incidência e casos null, pra não
+    comparar 4 semanas de um com 2 de outro."""
     d = id_doenca(doenca)
     fim = consulta("SELECT max(semana_inicio) AS fim FROM fato_casos_municipio WHERE id_doenca = %s",
                    (d,))[0]["fim"]
@@ -212,7 +213,7 @@ def municipios(doenca: str = "dengue"):
     linhas = consulta("""
         SELECT m.geocode, m.nome,
                CASE WHEN count(f.semana_inicio) = 4 THEN sum(f.incidencia_100k)::float END AS incidencia_4sem,
-               sum(f.casos_estimados)::float AS casos_4sem,
+               CASE WHEN count(f.semana_inicio) = 4 THEN sum(f.casos_estimados)::float END AS casos_4sem,
                count(f.semana_inicio)::int AS semanas
         FROM dim_municipio m
         LEFT JOIN fato_casos_municipio f
