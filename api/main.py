@@ -3,8 +3,9 @@ API do Observatório - lê o Data Warehouse e devolve JSON pro front.
 Docs automáticas em /api/docs (o FastAPI gera sozinho - bom pra mostrar na apresentação).
 """
 import os
+import statistics
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
@@ -27,7 +28,7 @@ def banco():
         yield conn
 
 
-def consulta(sql: str, params: tuple = ()) -> list[dict]:
+def consulta(sql: str, params: tuple | dict = ()) -> list[dict]:
     with banco() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -62,17 +63,12 @@ def resumo(doenca: str = "dengue"):
                coalesce(sum(limite_superior), 0)::float AS maximo
         FROM fato_previsao WHERE id_doenca = %s
     """, (d,))[0]
-    # canal endêmico simplificado: média da mesma semana nos anos anteriores
+    # faixa normal da semana atual, tirada do canal endêmico
     semana = consulta("SELECT semana_epi FROM dim_tempo WHERE semana_inicio = %s",
                       (atual[0]["semana_inicio"],))
-    media_hist = None
+    canal_semana = None
     if semana:
-        r = consulta("""
-            SELECT avg(c.casos_notificados)::float AS media
-            FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
-            WHERE c.id_doenca = %s AND t.semana_epi = %s AND c.semana_inicio < %s
-        """, (d, semana[0]["semana_epi"], atual[0]["semana_inicio"]))
-        media_hist = r[0]["media"]
+        canal_semana = next((c for c in canal(d) if c["semana_epi"] == semana[0]["semana_epi"]), None)
 
     return {
         "doenca": doenca,
@@ -87,21 +83,53 @@ def resumo(doenca: str = "dengue"):
         },
         "incidencia_100k": atual[0]["incidencia"],
         "nivel_alerta": NIVEIS.get(atual[0]["nivel_alerta"], "indefinido"),
-        "media_historica_semana": media_hist,
+        # compare com estimativa_infodengue.casos, não com os notificados (que ainda vão crescer)
+        "canal_endemico_semana": canal_semana,
         "previsao_4_semanas": prev,
     }
+
+
+def canal(d: int) -> list[dict]:
+    """Canal endêmico: para cada semana do ano, mediana e quartis dos casos ESTIMADOS
+    nos anos anteriores ao atual.
+    - mediana/quartis em vez de média: um ano de epidemia (2024) puxa a média pra cima
+    - estimados em vez de notificados: a semana atual ainda não fechou (atraso de notificação)
+    - entre q1 e q3 fica a metade "do meio" dos anos: é a faixa normal"""
+    return consulta("""
+        SELECT t.semana_epi,
+               percentile_cont(0.25) WITHIN GROUP (ORDER BY c.casos_estimados)::float AS q1,
+               percentile_cont(0.50) WITHIN GROUP (ORDER BY c.casos_estimados)::float AS mediana,
+               percentile_cont(0.75) WITHIN GROUP (ORDER BY c.casos_estimados)::float AS q3
+        FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
+        WHERE c.id_doenca = %(d)s
+          AND t.ano < (SELECT max(t2.ano) FROM fato_casos c2 JOIN dim_tempo t2 USING (semana_inicio)
+                       WHERE c2.id_doenca = %(d)s)
+        GROUP BY t.semana_epi ORDER BY t.semana_epi
+    """, {"d": d})
+
+
+@app.get("/api/canal-endemico")
+def canal_endemico(doenca: str = "dengue"):
+    """Faixa normal (q1 a q3) e mediana de cada semana epidemiológica, pra desenhar atrás da curva."""
+    return canal(id_doenca(doenca))
 
 
 @app.get("/api/casos/semanal")
 def casos_semanal(doenca: str = "dengue", desde: date = Query(date(2015, 1, 1))):
     """Curva de casos (observados) + previsão, pra o gráfico de linha."""
     d = id_doenca(doenca)
+    # semana_epi serve pra casar cada ponto com o canal endêmico no gráfico
     observados = consulta("""
-        SELECT semana_inicio, casos_notificados AS notificados, casos_estimados::float AS estimados
-        FROM fato_casos WHERE id_doenca = %s AND semana_inicio >= %s ORDER BY semana_inicio
+        SELECT c.semana_inicio, t.semana_epi, c.casos_notificados AS notificados,
+               c.casos_estimados::float AS estimados
+        FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
+        WHERE c.id_doenca = %s AND c.semana_inicio >= %s ORDER BY c.semana_inicio
     """, (d, desde))
+    # semanas futuras ainda não estão na dim_tempo: calcula como o ETL
+    # (a semana epidemiológica é do ano da sua quarta-feira; semana 1 = quarta entre 1 e 7/jan)
     previsao = consulta("""
-        SELECT semana_inicio, casos_previstos::float AS previstos,
+        SELECT semana_inicio, (extract(doy FROM semana_inicio + 3)::int - 1) / 7 + 1 AS semana_epi,
+               casos_previstos::float AS previstos,
                limite_inferior::float AS minimo, limite_superior::float AS maximo
         FROM fato_previsao WHERE id_doenca = %s ORDER BY semana_inicio
     """, (d,))
@@ -121,6 +149,78 @@ def clima_vs_casos(doenca: str = "dengue", desde: date = Query(date(2023, 1, 1))
         WHERE t.semana_inicio >= %s
         ORDER BY t.semana_inicio
     """, (d, desde))
+
+
+def spearman(x: list, y: list) -> float | None:
+    """Correlação de Spearman: a de Pearson calculada sobre as POSIÇÕES (ranks) dos valores.
+    Não exige relação linear e um ano de epidemia não domina o resultado."""
+    try:
+        return round(statistics.correlation(x, y, method="ranked"), 3)
+    except statistics.StatisticsError:  # menos de 2 pares ou série constante
+        return None
+
+
+@app.get("/api/correlacao-defasagem")
+def correlacao_defasagem(doenca: str = "dengue"):
+    """Análise DIAGNÓSTICA: correlação entre os casos de uma semana e a chuva/temperatura
+    de 0 a 12 semanas ANTES. Se a chuva cria criadouros e o mosquito leva semanas pra virar
+    surto, a correlação cresce com a defasagem. Atenção: correlação não prova causa
+    (chuva e casos também sobem juntos só por serem da mesma época do ano)."""
+    d = id_doenca(doenca)
+    casos = consulta("SELECT semana_inicio, casos_estimados::float AS casos FROM fato_casos "
+                     "WHERE id_doenca = %s AND casos_estimados IS NOT NULL", (d,))
+    clima = {r["semana_inicio"]: r for r in consulta(
+        "SELECT semana_inicio, chuva_mm::float AS chuva, temp_media::float AS temp FROM fato_clima")}
+
+    resultado = []
+    for defasagem in range(13):
+        # casos da semana s  x  clima da semana s - defasagem
+        pares = [(c["casos"], clima.get(c["semana_inicio"] - timedelta(weeks=defasagem))) for c in casos]
+        chuva = [(n, cl["chuva"]) for n, cl in pares if cl and cl["chuva"] is not None]
+        temp = [(n, cl["temp"]) for n, cl in pares if cl and cl["temp"] is not None]
+        resultado.append({
+            "defasagem_semanas": defasagem,
+            "chuva": spearman(*zip(*chuva)) if chuva else None,
+            "temperatura": spearman(*zip(*temp)) if temp else None,
+            "semanas_usadas_chuva": len(chuva),
+            "semanas_usadas_temperatura": len(temp),
+        })
+    return resultado
+
+
+@app.get("/api/mapa-calor")
+def mapa_calor(doenca: str = "dengue"):
+    """Incidência de cada semana de cada ano, pro mapa de calor ano x semana
+    (mostra a sazonalidade e a epidemia de 2024 num gráfico só)."""
+    d = id_doenca(doenca)
+    return consulta("""
+        SELECT t.ano, t.semana_epi, c.incidencia_100k::float AS incidencia_100k
+        FROM fato_casos c JOIN dim_tempo t USING (semana_inicio)
+        WHERE c.id_doenca = %s ORDER BY t.ano, t.semana_epi
+    """, (d,))
+
+
+@app.get("/api/municipios")
+def municipios(doenca: str = "dengue"):
+    """Mapa da Região Metropolitana: incidência somada nas últimas 4 semanas por município.
+    Município sem as 4 semanas (fonte atrasou) volta com incidência e casos null, pra não
+    comparar 4 semanas de um com 2 de outro."""
+    d = id_doenca(doenca)
+    fim = consulta("SELECT max(semana_inicio) AS fim FROM fato_casos_municipio WHERE id_doenca = %s",
+                   (d,))[0]["fim"]
+    if fim is None:
+        raise HTTPException(404, "Sem dados da RMS. Rode o ETL primeiro.")
+    linhas = consulta("""
+        SELECT m.geocode, m.nome,
+               CASE WHEN count(f.semana_inicio) = 4 THEN sum(f.incidencia_100k)::float END AS incidencia_4sem,
+               CASE WHEN count(f.semana_inicio) = 4 THEN sum(f.casos_estimados)::float END AS casos_4sem,
+               count(f.semana_inicio)::int AS semanas
+        FROM dim_municipio m
+        LEFT JOIN fato_casos_municipio f
+               ON f.geocode = m.geocode AND f.id_doenca = %s AND f.semana_inicio > %s::date - 28
+        GROUP BY m.geocode, m.nome ORDER BY m.nome
+    """, (d, fim))
+    return {"semana_fim": fim, "municipios": linhas}
 
 
 @app.get("/api/anual")

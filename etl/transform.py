@@ -15,6 +15,8 @@ import json
 import numpy as np
 import pandas as pd
 
+from extract import GEOCODE_SALVADOR, MUNICIPIOS_RMS
+
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
 ID_DOENCA = {"dengue": 1, "chikungunya": 2}
 
@@ -28,8 +30,11 @@ def _inicio_semana_epi(d: pd.Series) -> pd.Series:
     return (d - pd.to_timedelta((d.dt.weekday + 1) % 7, unit="D")).dt.normalize()
 
 
-def transformar_casos(caminho: Path, doenca: str) -> pd.DataFrame:
+def transformar_casos(caminho: Path, doenca: str) -> tuple[pd.DataFrame, float]:
+    """Devolve a tabela limpa e a fração de linhas SEM DATA no arquivo original
+    (medida antes da limpeza, porque o filtro de datas futuras descarta essas linhas)."""
     df = pd.read_csv(caminho)
+    nulos_data = float(df["data_iniSE"].isna().mean()) if len(df) else 0.0
 
     # 1. Data de início da semana (vem como texto ou como milissegundos, depende da versão)
     if pd.api.types.is_numeric_dtype(df["data_iniSE"]):
@@ -62,7 +67,7 @@ def transformar_casos(caminho: Path, doenca: str) -> pd.DataFrame:
     df = df[df["semana_inicio"] <= pd.Timestamp(date.today())]          # sem datas futuras
 
     df["id_doenca"] = ID_DOENCA[doenca]
-    return df.sort_values("semana_inicio").reset_index(drop=True)
+    return df.sort_values("semana_inicio").reset_index(drop=True), nulos_data
 
 
 def transformar_clima(caminho: Path) -> pd.DataFrame:
@@ -96,15 +101,29 @@ def transformar_clima(caminho: Path) -> pd.DataFrame:
     return semanal.round({"chuva_mm": 1, "temp_media": 1, "temp_min": 1, "umidade_media": 1})
 
 
-def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> list[tuple]:
+def semanas_com_explosao(df: pd.DataFrame) -> pd.Series:
+    """Semanas com mais de 5x a média das 4 anteriores (e pelo menos 50 casos).
+    Na epidemia de 2024 a maior alta de uma semana pra outra foi ~3x, então isso
+    costuma ser erro de digitação ou lote de notificações atrasadas."""
+    media_4_antes = df["casos_notificados"].shift(1).rolling(4).mean()
+    explosao = (df["casos_notificados"] > 5 * media_4_antes) & (df["casos_notificados"] >= 50)
+    return df.loc[explosao, "semana_inicio"]
+
+
+def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame,
+                        nulos_data: dict[str, float]) -> list[tuple]:
     """Regras simples. Erro = barra o lote. Aviso = segue, mas registra."""
     log = []
     for doenca, df in casos.items():
+        nulos = nulos_data[doenca]
+        if nulos > 0.05:                                            # completude
+            raise FalhaDeQualidade(f"{doenca}: {nulos:.0%} das linhas sem data")
         if len(df) < 52:
             raise FalhaDeQualidade(f"{doenca}: só {len(df)} semanas (esperado 52+)")
-        nulos = df["semana_inicio"].isna().mean()
-        if nulos > 0.05:                                            # completude
-            raise FalhaDeQualidade(f"{doenca}: {nulos:.0%} sem data")
+        explosoes = semanas_com_explosao(df)                        # consistência (só avisa)
+        if len(explosoes):
+            datas = ", ".join(str(d.date()) for d in explosoes)
+            log.append(("qualidade", "aviso", f"{doenca}: salto de casos suspeito em {datas} (mantido)"))
         ultima = df["semana_inicio"].max()
         atraso = (pd.Timestamp(date.today()) - ultima).days
         if atraso > 21:                                             # atualidade
@@ -117,16 +136,46 @@ def portao_de_qualidade(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> 
     return log
 
 
-def montar_dim_tempo(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> pd.DataFrame:
-    partes = [df[["semana_inicio", "ano", "semana_epi"]] for df in casos.values()]
+def transformar_rms(arquivos_rms: dict, casos: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, list[tuple]]:
+    """Casos por município da RMS, pro mapa. Mesma limpeza de Salvador, mas aqui
+    um município com problema só gera aviso e fica de fora: o mapa é complementar,
+    não pode barrar o lote de Salvador."""
+    partes, log = [], []
+    for doenca, por_municipio in arquivos_rms.items():
+        partes.append(casos[doenca].assign(geocode=GEOCODE_SALVADOR))  # Salvador já foi lida
+        for geocode, caminho in por_municipio.items():
+            nome = MUNICIPIOS_RMS[geocode]
+            if caminho is None:
+                log.append(("qualidade", "aviso", f"rms {doenca} / {nome}: download falhou, ficou de fora"))
+                continue
+            try:
+                df, nulos = transformar_casos(caminho, doenca)
+            except Exception as e:  # ex.: a fonte respondeu outra coisa no lugar do CSV
+                log.append(("qualidade", "aviso",
+                            f"rms {doenca} / {nome}: arquivo inválido ({type(e).__name__}: {e}), ficou de fora"))
+                continue
+            if len(df) < 52 or nulos > 0.05:
+                log.append(("qualidade", "aviso",
+                            f"rms {doenca} / {nome}: {len(df)} semanas, {nulos:.0%} sem data, ficou de fora"))
+                continue
+            partes.append(df.assign(geocode=geocode))
+    rms = pd.concat(partes, ignore_index=True)
+    log.append(("qualidade", "ok", f"rms: {rms['geocode'].nunique()} municípios, {len(rms)} linhas"))
+    return rms, log
+
+
+def montar_dim_tempo(casos: list[pd.DataFrame], clima: pd.DataFrame) -> pd.DataFrame:
+    partes = [df[["semana_inicio", "ano", "semana_epi"]] for df in casos]
     tempo = pd.concat(partes).drop_duplicates("semana_inicio")
 
-    # semanas que só existem no clima: calcula ano/semana aproximados
+    # semanas que só existem no clima: calcula ano/semana epidemiológica pela quarta-feira
+    # (a semana é do ano que tem 4+ dos seus 7 dias, ou seja, o ano da quarta;
+    #  semana 1 = quarta entre 1 e 7 de janeiro). Bate com o SE do InfoDengue.
     so_clima = clima.loc[~clima["semana_inicio"].isin(tempo["semana_inicio"]), ["semana_inicio"]].copy()
     if len(so_clima):
-        iso = (so_clima["semana_inicio"] + pd.Timedelta(days=3)).dt.isocalendar()
-        so_clima["ano"] = iso["year"].astype(int)
-        so_clima["semana_epi"] = iso["week"].astype(int)
+        quarta = so_clima["semana_inicio"] + pd.Timedelta(days=3)
+        so_clima["ano"] = quarta.dt.year
+        so_clima["semana_epi"] = (quarta.dt.dayofyear - 1) // 7 + 1
         tempo = pd.concat([tempo, so_clima])
 
     tempo["mes"] = (tempo["semana_inicio"] + pd.Timedelta(days=3)).dt.month
@@ -135,10 +184,15 @@ def montar_dim_tempo(casos: dict[str, pd.DataFrame], clima: pd.DataFrame) -> pd.
 
 
 def transformar_tudo(arquivos: dict) -> dict:
-    casos = {d: transformar_casos(p, d) for d, p in arquivos["infodengue"].items()}
+    casos, nulos_data = {}, {}
+    for d, p in arquivos["infodengue"].items():
+        casos[d], nulos_data[d] = transformar_casos(p, d)
     clima = transformar_clima(arquivos["clima"])
-    log = portao_de_qualidade(casos, clima)
-    tempo = montar_dim_tempo(casos, clima)
+    log = portao_de_qualidade(casos, clima, nulos_data)
+    rms, log_rms = transformar_rms(arquivos.get("rms", {}), casos)
+    log += log_rms
+    tempo = montar_dim_tempo([*casos.values(), rms], clima)
+    municipios = pd.DataFrame(list(MUNICIPIOS_RMS.items()), columns=["geocode", "nome"])
 
     # camada "prata": dado limpo salvo no lake também (bom pra auditoria)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -146,6 +200,9 @@ def transformar_tudo(arquivos: dict) -> dict:
     fato_casos.to_csv(PROCESSED_DIR / "fato_casos.csv", index=False)
     clima.to_csv(PROCESSED_DIR / "fato_clima.csv", index=False)
     tempo.to_csv(PROCESSED_DIR / "dim_tempo.csv", index=False)
+    rms.to_csv(PROCESSED_DIR / "fato_casos_municipio.csv", index=False)
 
-    print(f"[transform] {len(fato_casos)} linhas de casos, {len(clima)} semanas de clima")
-    return {"fato_casos": fato_casos, "fato_clima": clima, "dim_tempo": tempo, "log": log}
+    print(f"[transform] {len(fato_casos)} linhas de casos, {len(clima)} semanas de clima, "
+          f"{len(rms)} linhas da RMS")
+    return {"fato_casos": fato_casos, "fato_clima": clima, "dim_tempo": tempo,
+            "dim_municipio": municipios, "fato_casos_municipio": rms, "log": log}

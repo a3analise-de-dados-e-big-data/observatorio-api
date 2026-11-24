@@ -4,7 +4,7 @@ Back-end do trabalho A3 (Análise de Dados e Big Data · UNIFACS): ETL, Data War
 O painel fica em outro repositório, [`observatorio-front`](https://github.com/a3analise-de-dados-e-big-data/observatorio-front), hospedado na Vercel.
 
 ```
-InfoDengue + Open-Meteo
+InfoDengue (Salvador + RMS) + Open-Meteo
       │  etl/extract.py      (E) baixa e guarda o original
       ▼
 data/raw/                     ← DATA LAKE (arquivos brutos, um por execução)
@@ -24,6 +24,7 @@ observatorio-front (Vercel)   → painel
 | Pasta | O que é |
 | --- | --- |
 | `db/init.sql` | Tabelas do Warehouse (modelo estrela). Roda sozinho na 1ª subida. |
+| `db/migracoes/` | Mudanças nas tabelas pra aplicar na mão num banco que já existe (ver "Atualizar depois de um push") |
 | `etl/` | Pipeline: `extract.py`, `transform.py`, `load.py`, `previsao.py`, `main.py` (roda tudo) |
 | `api/main.py` | Endpoints que leem o Warehouse |
 | `deploy/Caddyfile.add` | Bloco pra colar no Caddy compartilhado da VPS |
@@ -73,16 +74,22 @@ Saída esperada:
 
 ```
 [extract] dengue: ...
+[extract] dengue: 12 municípios da RMS
 [extract] chikungunya: ...
+[extract] chikungunya: 12 municípios da RMS
 [extract] clima: ...
-[transform] 1236 linhas de casos, 618 semanas de clima
+[transform] 1238 linhas de casos, 619 semanas de clima, 16094 linhas da RMS
 [load] Warehouse atualizado
-[previsao] dengue: MAE no último ano -> ...
-[previsao] chikungunya: MAE no último ano -> ...
+[previsao] dengue: MAE modelo vs ingênuo no último ano -> 1 sem: ... vs ..., ...
+[previsao] chikungunya: MAE modelo vs ingênuo no último ano -> ...
 Pipeline concluído.
 ```
 
-(O número de linhas cresce uma semana por vez, conforme o InfoDengue publica.)
+(O número de linhas cresce uma semana por vez, conforme o InfoDengue publica. São 27 downloads
+do InfoDengue: Salvador e os outros 12 municípios da RMS, para dengue e chikungunya.)
+
+No MAE, "modelo vs ingênuo" compara o erro do nosso modelo com o de chutar que daqui a h semanas
+os casos serão iguais aos de hoje. O modelo só está ajudando se o primeiro número for menor.
 
 **5. Ligar no Caddy** (só depois que o DNS do passo 1 propagar)
 
@@ -137,8 +144,25 @@ cd /root/observatorio-api && git pull && docker compose up -d --build
 ```
 
 O `db/init.sql` só roda na **primeira** subida do banco. Se um push mudar as tabelas, o banco que já
-existe não muda sozinho: aplique a mudança na mão (`docker compose exec db psql -U observatorio`,
-depois o `ALTER TABLE ...`) e rode o ETL de novo.
+existe não muda sozinho: cada mudança vem num arquivo em `db/migracoes/`, que você aplica **uma vez**,
+na ordem do número, **antes** de rodar o ETL novo. Os arquivos usam `IF NOT EXISTS`, então rodar de
+novo não estraga nada.
+
+| Migração | O que faz |
+| --- | --- |
+| `001_rms.sql` | Cria `dim_municipio` e `fato_casos_municipio` (mapa da Região Metropolitana) |
+
+```bash
+cd /root/observatorio-api && git pull
+docker compose exec -T db psql -U observatorio -v ON_ERROR_STOP=1 < db/migracoes/001_rms.sql
+docker compose up -d --build          # API nova
+docker compose build etl && docker compose run --rm etl   # ETL novo: preenche as tabelas novas
+# conferir:
+docker compose exec db psql -U observatorio -c "SELECT count(*) FROM fato_casos_municipio;"
+```
+
+Se o ETL novo rodar antes da migração, Salvador atualiza normalmente e só o mapa da RMS fica de
+fora, com um aviso no `etl_log`. É só aplicar a migração e rodar o ETL de novo.
 
 ## Comandos úteis
 
@@ -171,10 +195,23 @@ cd etl && python main.py && cd ..
 cd api && uvicorn main:app --reload    # API em http://localhost:8000/api/docs
 ```
 
+## Testes
+
+Testam a leitura do CSV do InfoDengue (data em texto e em milissegundos), o portão de qualidade
+(lote vazio, datas nulas, salto de casos) e o agrupamento semanal do clima. Não precisam de
+internet nem de banco.
+
+```bash
+cd etl
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## Se der erro
 
 - **Erro no ETL sobre alguma coluna (`KeyError: 'data_iniSE'`, `'p_inc100k'` etc.):** o InfoDengue mudou o nome de alguma coluna. Abra o CSV em `data/raw/infodengue/dengue/` e ajuste o `rename` em `etl/transform.py`.
-- **"LOTE BARRADO":** o portão de qualidade segurou os dados (ex.: API devolveu vazio). O painel continua com a última carga boa. Rode de novo mais tarde.
+- **`[qualidade] FALHOU`:** o portão de qualidade segurou os dados (ex.: API devolveu vazio). O painel continua com a última carga boa. Rode de novo mais tarde.
+- **`[extracao] FALHOU` / `[carga] FALHOU`:** fonte fora do ar ou banco com problema. Nada pela metade fica no banco (a carga é uma transação só) e o erro fica registrado no `etl_log` com `status = 'erro'`.
 - **`network edge declared as external, but could not be found`:** você está fora da VPS. Rode `docker network create edge`.
 - **HTTPS não sobe / erro de certificado:** o DNS ainda não propagou. Confira com `dig observatorio-api.rafaelrangelalmeida.com` e veja `docker logs caddy`.
 - **Painel em branco / alerta "Não consegui carregar os dados":** o ETL ainda não rodou (passo 4).
@@ -190,7 +227,24 @@ Pela mesma razão, `etl/previsao.py` não gera previsão pra uma doença cujo ú
 
 ## O que é cenário (não implementado)
 
-No documento, o projeto também usa dados por bairro (SMS Salvador), denúncias do 156 e LIRAa. Esses dados não são públicos, então o protótipo trabalha no nível da cidade inteira. O mapa por bairro fica como proposta.
+No documento, o projeto também usa dados por bairro (SMS Salvador), denúncias do 156 e LIRAa. Esses dados não são públicos, então o protótipo trabalha no nível da cidade inteira. O mapa por bairro fica como proposta (veja abaixo por quê); no lugar dele, o painel tem o mapa por **município da Região Metropolitana** (13 municípios, códigos do IBGE em `etl/extract.py`), que usa a mesma API do InfoDengue.
+
+### Por que não tem mapa por bairro de Salvador
+
+Conferido em nov/2026 nas fontes públicas:
+
+- **InfoDengue:** só publica por município (`alertcity` recebe o código IBGE da cidade).
+- **SINAN aberto** (notificações individuais anonimizadas do Ministério da Saúde, arquivo
+  `DENGBR25.csv` em `s3.sa-east-1.amazonaws.com/ckan.saude.gov.br/SINAN/Dengue/csv/`): tem 121
+  colunas, e o recorte geográfico mais fino é o **município de residência** (`ID_MN_RESI`). Não tem
+  bairro, endereço, CEP nem setor censitário: isso é retirado na anonimização.
+- **SMS Salvador:** conta os casos por **distrito sanitário** (12 distritos), mas não publica essa série
+  como dado aberto.
+
+Os **contornos** dos bairros existem (Malha de Bairros do Censo 2022 do IBGE e a base cartográfica
+da prefeitura); o que falta são os casos. Usar a unidade de saúde que notificou (`ID_UNIDADE`) como
+"bairro" seria enganoso: mostra onde a pessoa foi atendida, não onde mora. O caminho seria pedir
+à SMS, pela Lei de Acesso à Informação, os casos por bairro (ou distrito sanitário) e semana.
 
 ## LGPD no protótipo
 
