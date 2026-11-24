@@ -44,14 +44,22 @@ def carregar_tudo(dados: dict):
         _upsert(cur, "fato_clima", dados["fato_clima"],
                 ["semana_inicio", "chuva_mm", "temp_media", "temp_min", "umidade_media"],
                 ["semana_inicio"])
-        _upsert(cur, "dim_municipio", dados["dim_municipio"], ["geocode", "nome"], ["geocode"])
-        _upsert(cur, "fato_casos_municipio", dados["fato_casos_municipio"],
-                ["semana_inicio", "id_doenca", "geocode", "casos_notificados", "casos_estimados",
-                 "incidencia_100k", "nivel_alerta"],
-                ["semana_inicio", "id_doenca", "geocode"])
+        cur.execute("SELECT to_regclass('dim_municipio') IS NOT NULL "
+                    "AND to_regclass('fato_casos_municipio') IS NOT NULL")
+        tem_rms = cur.fetchone()[0]
+        if tem_rms:
+            _upsert(cur, "dim_municipio", dados["dim_municipio"], ["geocode", "nome"], ["geocode"])
+            _upsert(cur, "fato_casos_municipio", dados["fato_casos_municipio"],
+                    ["semana_inicio", "id_doenca", "geocode", "casos_notificados", "casos_estimados",
+                     "incidencia_100k", "nivel_alerta"],
+                    ["semana_inicio", "id_doenca", "geocode"])
+        else:
+            print("[load] tabelas da RMS não existem: aplique db/migracoes/001_rms.sql")
+            registrar_log(cur, "carga", "aviso",
+                          "tabelas da RMS não existem, mapa não atualizado: aplique db/migracoes/001_rms.sql")
         for etapa, status, msg in dados["log"]:
             registrar_log(cur, etapa, status, msg)
+        rms = f"{len(dados['fato_casos_municipio'])} da RMS" if tem_rms else "RMS pulada"
         registrar_log(cur, "carga", "ok",
-                      f"{len(dados['fato_casos'])} linhas de casos, {len(dados['fato_clima'])} de clima, "
-                      f"{len(dados['fato_casos_municipio'])} da RMS")
+                      f"{len(dados['fato_casos'])} linhas de casos, {len(dados['fato_clima'])} de clima, {rms}")
     print("[load] Warehouse atualizado")

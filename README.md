@@ -161,8 +161,8 @@ docker compose build etl && docker compose run --rm etl   # ETL novo: preenche a
 docker compose exec db psql -U observatorio -c "SELECT count(*) FROM fato_casos_municipio;"
 ```
 
-Se o ETL novo rodar antes da migração, a carga falha inteira (é uma transação só), o banco fica como
-estava e o erro aparece no `etl_log`. É só aplicar a migração e rodar de novo.
+Se o ETL novo rodar antes da migração, Salvador atualiza normalmente e só o mapa da RMS fica de
+fora, com um aviso no `etl_log`. É só aplicar a migração e rodar o ETL de novo.
 
 ## Comandos úteis
 
