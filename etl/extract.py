@@ -106,7 +106,8 @@ def extrair_tudo(hoje: date | None = None) -> dict:
             except requests.RequestException as e:
                 print(f"[extract] {doenca} / {nome}: falhou ({e})")
                 arquivos["rms"][doenca][geocode] = None
-        print(f"[extract] {doenca}: {len(MUNICIPIOS_RMS) - 1} municípios da RMS")
+        baixados = sum(p is not None for p in arquivos["rms"][doenca].values())
+        print(f"[extract] {doenca}: {baixados} de {len(MUNICIPIOS_RMS) - 1} municípios da RMS")
     arquivos["clima"] = extrair_clima(hoje)
     print(f"[extract] clima: {arquivos['clima']}")
     return arquivos
