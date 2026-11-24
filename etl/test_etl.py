@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from transform import (FalhaDeQualidade, montar_dim_tempo, portao_de_qualidade,
-                       transformar_casos, transformar_clima)
+                       transformar_casos, transformar_clima, transformar_rms)
 
 COLUNAS = "data_iniSE,SE,casos_est,casos_est_min,casos_est_max,casos,p_inc100k,nivel"
 
@@ -126,3 +126,17 @@ def test_semana_epidemiologica_das_semanas_so_com_clima():
     assert tempo.loc["2026-11-08", ["ano", "semana_epi"]].tolist() == [2026, 45]
     assert tempo.loc["2025-12-28", ["ano", "semana_epi"]].tolist() == [2025, 53]
     assert tempo.loc["2026-01-04", ["ano", "semana_epi"]].tolist() == [2026, 1]
+
+def test_rms_ignora_municipio_com_arquivo_invalido(tmp_path):
+    salvador, _ = transformar_casos(csv_infodengue(tmp_path, semanas(60), "ssa.csv"), "dengue")
+    camacari = csv_infodengue(tmp_path, semanas(60), "camacari.csv")
+    quebrado = tmp_path / "vera_cruz.csv"
+    quebrado.write_text("erro\nservico indisponivel\n", encoding="utf-8")  # 200 com outra coisa no corpo
+
+    rms, log = transformar_rms({"dengue": {2905701: camacari, 2933208: quebrado, 2916104: None}},
+                               {"dengue": salvador})
+
+    assert set(rms["geocode"]) == {2927408, 2905701}  # Salvador + Camaçari
+    avisos = [msg for _, status, msg in log if status == "aviso"]
+    assert any("Vera Cruz" in m and "arquivo inválido" in m for m in avisos)
+    assert any("Itaparica" in m and "download falhou" in m for m in avisos)

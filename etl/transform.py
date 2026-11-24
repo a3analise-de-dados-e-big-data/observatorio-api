@@ -148,7 +148,12 @@ def transformar_rms(arquivos_rms: dict, casos: dict[str, pd.DataFrame]) -> tuple
             if caminho is None:
                 log.append(("qualidade", "aviso", f"rms {doenca} / {nome}: download falhou, ficou de fora"))
                 continue
-            df, nulos = transformar_casos(caminho, doenca)
+            try:
+                df, nulos = transformar_casos(caminho, doenca)
+            except Exception as e:  # ex.: a fonte respondeu outra coisa no lugar do CSV
+                log.append(("qualidade", "aviso",
+                            f"rms {doenca} / {nome}: arquivo inválido ({type(e).__name__}: {e}), ficou de fora"))
+                continue
             if len(df) < 52 or nulos > 0.05:
                 log.append(("qualidade", "aviso",
                             f"rms {doenca} / {nome}: {len(df)} semanas, {nulos:.0%} sem data, ficou de fora"))
